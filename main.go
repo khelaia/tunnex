@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,23 +27,37 @@ func main() {
 			return
 		}
 
-		// read messages for faster connection close
+		ws = wsInstance
+
 		go func() {
 			defer func(wsInstance *websocket.Conn) {
 				err := wsInstance.Close()
 				if err != nil {
 					fmt.Println(err)
 				}
+				ws = nil
 			}(wsInstance)
 			for {
-				if _, _, err := wsInstance.ReadMessage(); err != nil {
+				_, data, err := wsInstance.ReadMessage()
+				if err != nil {
 					fmt.Println("connection closed:", err)
+					return
+				}
+
+				message := string(data)
+
+				switch {
+				case strings.HasPrefix(message, "msg:"):
+					parts := strings.Split(message, ":")
+					if len(parts) != 2 {
+						continue
+					}
+					fmt.Println(parts[1])
+				case strings.HasPrefix(message, "close"):
 					return
 				}
 			}
 		}()
-
-		ws = wsInstance
 
 		return
 	})
