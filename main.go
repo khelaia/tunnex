@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -63,15 +65,52 @@ func main() {
 	})
 
 	go func() {
-		for {
-			time.Sleep(time.Second * 1)
-			if ws != nil {
-				message := fmt.Sprintf("Server Time: %s", time.Now().String())
-				_ = ws.WriteMessage(websocket.TextMessage, []byte(message))
-			}
-		}
+		fmt.Println("HTTP server listening on :8888")
+		log.Fatal(http.ListenAndServe(":8888", nil))
 	}()
 
-	fmt.Println("HTTP server listening on :8888")
-	log.Fatal(http.ListenAndServe(":8888", nil))
+	//Network Listener
+	nl, err := net.Listen("tcp", ":5000")
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Network Listening on :5000")
+
+	for {
+		netConn, cError := nl.Accept()
+		if cError != nil {
+			fmt.Println("Error accepting connection:", cError)
+			continue
+		}
+
+		if ws == nil {
+			fmt.Println("WS is not active to send traffic")
+			_ = netConn.Close()
+			continue
+		}
+
+		for {
+			buf := make([]byte, 10*1024)
+			dataLen, readError := netConn.Read(buf)
+
+			if dataLen > 0 {
+				messageHex := fmt.Sprintf("msg:%s", hex.EncodeToString(buf[0:dataLen]))
+
+				err := ws.WriteMessage(websocket.TextMessage, []byte(messageHex))
+				if err != nil {
+					return
+				}
+			}
+
+			if readError == io.EOF {
+				return
+			}
+			if readError != nil {
+				fmt.Println("Can't read from local network", readError)
+				return
+			}
+		}
+	}
 }
