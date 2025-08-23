@@ -18,6 +18,7 @@ var upgrader = websocket.Upgrader{
 
 var (
 	ws *websocket.Conn
+	nc net.Conn
 )
 
 func main() {
@@ -54,7 +55,17 @@ func main() {
 					if len(parts) != 2 {
 						continue
 					}
-					fmt.Println(parts[1])
+					decodedMsg, decodeError := hex.DecodeString(parts[1])
+					if decodeError != nil {
+						fmt.Println("Invalid Hex:", decodeError)
+						continue
+					}
+					if nc == nil {
+						fmt.Println("public connection closed")
+						continue
+					}
+					_, _ = nc.Write(decodedMsg)
+
 				case strings.HasPrefix(message, "close"):
 					return
 				}
@@ -84,6 +95,8 @@ func main() {
 			fmt.Println("Error accepting connection:", cError)
 			continue
 		}
+
+		nc = netConn
 
 		if ws == nil {
 			fmt.Println("WS is not active to send traffic")
