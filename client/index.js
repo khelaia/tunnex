@@ -20,12 +20,18 @@ ws.on('message', (data) => {
     switch (type) {
         case 'start':
             const sock = net.createConnection({host: '127.0.0.1', port: 3000}, ()=>{
+                const msg = data.toString();
+                const streamId = msg.split(":")[1].trim();
                 sock.on('data', (chunk) => {
                     const hex = Buffer.from(chunk).toString('hex');
                     ws.send(`msg:${streamId}:${hex}`);
                 });
-                sock.on('close', () => ws.send(`close:${streamId}`));
-                sock.on('error', () => ws.send(`close:${streamId}`));
+                sock.on('close', () => {
+                    ws.send(`close:${streamId}`)
+                });
+                sock.on('error', () => {
+                    ws.send(`close:${streamId}`)
+                });
             });
 
             streams.set(streamId, sock)
@@ -39,6 +45,17 @@ ws.on('message', (data) => {
                 console.error("cant write into local connection")
             }
             break
+        case 'close':
+            try {
+                const sock = streams.get(streamId)
+                sock?.destroy();
+            } catch {
+                console.error("cant destroy local connection")
+            } finally {
+                streams.delete(streamId)
+            }
+            break
+
     }
 });
 

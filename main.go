@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
@@ -27,9 +28,9 @@ var (
 )
 
 func emitToWebsocket(ws *websocket.Conn, message string) {
+	wsMu.Lock()
+	defer wsMu.Unlock()
 	if ws != nil {
-		wsMu.Lock()
-		defer wsMu.Unlock()
 		err := ws.WriteMessage(websocket.TextMessage, []byte(message))
 		if err != nil {
 			return
@@ -46,17 +47,14 @@ func main() {
 		}
 
 		wsMu.Lock()
+		if ws != nil {
+			_ = ws.Close()
+		}
 		ws = wsInstance
 		wsMu.Unlock()
+
 		go func() {
-			defer func(wsInstance *websocket.Conn) {
-				wsMu.Lock()
-				err := wsInstance.Close()
-				if err != nil {
-					fmt.Println(err)
-				}
-				ws = nil
-				wsMu.Unlock()
+			defer func() {
 
 				mu.Lock()
 				for id, conn := range streams {
@@ -64,7 +62,18 @@ func main() {
 					delete(streams, id)
 				}
 				mu.Unlock()
-			}(wsInstance)
+
+				wsMu.Lock()
+				if ws == wsInstance {
+					ws = nil
+				}
+				wsMu.Unlock()
+
+				err := wsInstance.Close()
+				if err != nil {
+					fmt.Println(err)
+				}
+			}()
 			for {
 				_, data, err := wsInstance.ReadMessage()
 				if err != nil {
@@ -75,7 +84,7 @@ func main() {
 				message := string(data)
 
 				parts := strings.Split(message, ":")
-				if len(parts) != 3 {
+				if len(parts) < 2 {
 					continue
 				}
 				streamId, streamIdError := strconv.ParseUint(parts[1], 0, 64)
@@ -85,28 +94,39 @@ func main() {
 					continue
 				}
 
+				mu.RLock()
 				currentStream := streams[streamId]
+				mu.RUnlock()
 				if currentStream == nil {
 					fmt.Println("public connection closed")
 					continue
 				}
 
+				messageType := parts[0]
+
 				switch {
-				case strings.HasPrefix(message, "msg:"):
+				case strings.EqualFold(messageType, "msg"):
+					if len(parts) != 3 {
+						continue
+					}
 					decodedMsg, decodeError := hex.DecodeString(parts[2])
 					if decodeError != nil {
 						fmt.Println("Invalid Hex:", decodeError)
 						continue
 					}
 
-					_, _ = currentStream.Write(decodedMsg)
-				case strings.HasPrefix(message, "close:"):
-					if streams[streamId] != nil {
-						mu.Lock()
-						_ = streams[streamId].Close()
-						delete(streams, streamId)
-						mu.Unlock()
+					_, writeError := currentStream.Write(decodedMsg)
+					if writeError != nil {
+						fmt.Println("Write Error:", writeError)
 					}
+				case strings.EqualFold(messageType, "close"):
+					mu.Lock()
+					if currentStream != nil {
+						_ = currentStream.Close()
+						delete(streams, streamId)
+					}
+					mu.Unlock()
+
 				}
 			}
 		}()
@@ -135,34 +155,44 @@ func main() {
 			continue
 		}
 
-		lastStreamId = lastStreamId + 1
-		mu.Lock()
-		streams[lastStreamId] = netConn
-		mu.Unlock()
-
-		if ws == nil {
+		wsMu.Lock()
+		currentWs := ws
+		wsMu.Unlock()
+		if currentWs == nil {
 			fmt.Println("WS is not active to send traffic")
 			_ = netConn.Close()
 			continue
 		}
 
-		emitToWebsocket(ws, fmt.Sprintf("start:%d", lastStreamId))
+		id := atomic.AddUint64(&lastStreamId, 1)
+		mu.Lock()
+		streams[id] = netConn
+		mu.Unlock()
 
-		go func(netConn net.Conn, lastStreamId uint64) {
+		emitToWebsocket(ws, fmt.Sprintf("start:%d", id))
+
+		go func(netConn net.Conn, id uint64) {
 			defer func() {
-				mu.Lock()
 				_ = netConn.Close()
-				delete(streams, lastStreamId)
+
+				mu.Lock()
+				if streams[id] == netConn {
+					delete(streams, id)
+				}
 				mu.Unlock()
+				emitToWebsocket(ws, fmt.Sprintf("close:%d", id))
 			}()
+			buf := make([]byte, 100*1024)
+
 			for {
-				buf := make([]byte, 100*1024)
 				dataLen, readError := netConn.Read(buf)
 
 				if dataLen > 0 {
-					messageHex := fmt.Sprintf("msg:%d:%s", lastStreamId, hex.EncodeToString(buf[0:dataLen]))
+					messageHex := fmt.Sprintf("msg:%d:%s", id, hex.EncodeToString(buf[0:dataLen]))
 
 					emitToWebsocket(ws, messageHex)
+				} else {
+					return
 				}
 
 				if readError == io.EOF {
@@ -173,6 +203,6 @@ func main() {
 					return
 				}
 			}
-		}(netConn, lastStreamId)
+		}(netConn, id)
 	}
 }
