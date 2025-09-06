@@ -4,7 +4,7 @@ const net = require('net');
 
 const streams = new Map()
 
-const ws = new WebSocket('ws://127.0.0.1:8888/start', {perMessageDeflate: false});
+const ws = new WebSocket('ws://127.0.0.1:8888/register?token=dito', {perMessageDeflate: false});
 
 
 ws.on('open', () => {
@@ -18,7 +18,7 @@ ws.on('message', (data) => {
     const streamId = msg.split(":")[1].trim();
 
     switch (type) {
-        case 'start':
+        case 'registered':
             const sock = net.createConnection({host: '127.0.0.1', port: 3000}, ()=>{
                 const msg = data.toString();
                 const streamId = msg.split(":")[1].trim();
