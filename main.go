@@ -191,7 +191,13 @@ func tokenFromHost(host string) string {
 	if len(parts) < 3 {
 		return ""
 	}
-	return parts[0]
+	sub := parts[0]
+	suffix := "-tunnex"
+	if strings.HasSuffix(sub, suffix) {
+		return strings.TrimSuffix(sub, suffix)
+	}
+
+	return ""
 }
 
 func publicListener(w http.ResponseWriter, r *http.Request) {
