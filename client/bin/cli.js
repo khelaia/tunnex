@@ -3,12 +3,15 @@
 import minimist from 'minimist';
 import WebSocket from 'ws';
 import net from 'net';
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 
 const argv = minimist(process.argv.slice(2), {
-    string: ['host', 'domain', 'sub', 'localHost', 'proto'],
+    string: ['host', 'domain', 'sub', 'localHost', 'proto', 'add-token', 'token', 'token-file',],
     number: ['port'],
-    boolean: ['insecure'],
-    alias: { h: 'host', p: 'port' },
+    boolean: ['insecure', 'help', 'h'],
+    alias: {h: 'host', p: 'port'},
     default: {
         domain: '127.0.0.1:8888',
         sub: 'tunnex',
@@ -18,11 +21,75 @@ const argv = minimist(process.argv.slice(2), {
     }
 });
 
+const printHelp = () => {
+    console.log(`
+tunnex - HTTP tunnel
+
+Usage:
+  tunnex --host <name> --port <localPort> [options]
+
+Options:
+  --host <string>         Public sub-host key to register (required)
+  --port <number>         Local TCP port to forward to (required)
+  --domain <host[:port]>  Tunnex server domain/host (default: 127.0.0.1:8888)
+  --sub <string>          Prefix for public base host (default: tunnex)
+  --proto <wss|ws>        Protocol for WS control channel (default: wss)
+  --localHost <host>      Local target host (default: 127.0.0.1)
+  --insecure              Skip TLS verification for WSS (default: false)
+  --token <string>        Token for X-Tunnex-Token header
+  --token-file <path>     Read token from a file
+  --add-token <string>    Write token to ./token.txt (0600) then exit
+  -h, --help              Show this help
+
+Token order: --token > --token-file > env TUNNEX_TOKEN > ./token.txt
+
+Examples:
+  tunnex --add-token abc123
+  tunnex --host app --port 3000 --domain tunnex.example.com --proto wss
+  tunnex --host app --port 3000 --domain 127.0.0.1:8888 --proto ws
+`);
+}
+
+if (argv.help) {
+    printHelp();
+    process.exit(0);
+}
+
+if (argv['add-token']) {
+    const p = path.resolve(process.cwd(), 'token.txt');
+    fs.writeFileSync(p, argv['add-token'], {mode: 0o600});
+    console.log(`[tunnex] token saved to ${p} (0600)`);
+    process.exit(0);
+}
+
+const readToken = (filePath) => {
+    try {
+        const s = fs.readFileSync(filePath, 'utf8');
+        return s.split(/\r?\n/)[0].trim();
+    } catch {
+        return undefined;
+    }
+}
+
+
+
 const host = argv.host;
 const localPort = Number(argv.port);
 if (!host || !localPort) {
-    console.error('Usage: tunnex --host <token> --port <localPort> [--domain tunnex-server-example.com] [--sub tunnex] [--proto wss|ws]');
+    console.error('[tunnex] Missing required flags.\n');
+    printHelp();
     process.exit(1);
+}
+
+let token = argv.token
+    ?? (argv['token-file'] ? readToken(argv['token-file']) : undefined)
+    ?? (process.env.TUNNEX_TOKEN || undefined)
+    ?? (fs.existsSync('token.txt') ? readToken('token.txt') : undefined);
+
+if (!token) {
+    console.error('[tunnex] No token found (header X-Tunnex-Token will be omitted).');
+    console.error('          Tip: use --token, --token-file, env TUNNEX_TOKEN, or --add-token.\n');
+    process.exit(1)
 }
 
 const baseHost = `${host}-${argv.sub}.${argv.domain}`;
@@ -36,7 +103,7 @@ const ws = new WebSocket(wsURL, {
     perMessageDeflate: false,
     rejectUnauthorized: !argv.insecure,
     headers: {
-        "X-Tunnex-Token": "e1beb782f1f8bc174fe73f2194ee4b47d83bcc8f7257be088b59cb13d3f291d6",
+        "X-Tunnex-Token": token,
     },
 });
 
@@ -44,11 +111,11 @@ const streams = new Map();
 
 ws.on('open', () => {
     console.log('[tunnex] WS connected')
-    setInterval(()=>{
+    setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
             ws.ping()
         }
-    },5000)
+    }, 5000)
 });
 
 ws.on('message', (data) => {
@@ -62,7 +129,7 @@ ws.on('message', (data) => {
     const payloadHex = (second === -1 ? '' : rest.slice(second + 1)).trim();
 
     if (type === 'registered') {
-        const sock = net.createConnection({ host: argv.localHost, port: localPort }, () => {
+        const sock = net.createConnection({host: argv.localHost, port: localPort}, () => {
             sock.on('data', (chunk) => {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(`msg:${streamId}:${chunk.toString('hex')}`);
@@ -78,14 +145,20 @@ ws.on('message', (data) => {
     if (type === 'msg') {
         const sock = streams.get(streamId);
         if (sock && sock.writable) {
-            try { sock.write(Buffer.from(payloadHex, 'hex')); } catch {}
+            try {
+                sock.write(Buffer.from(payloadHex, 'hex'));
+            } catch {
+            }
         }
         return;
     }
 
     if (type === 'close') {
         const sock = streams.get(streamId);
-        try { sock?.destroy(); } catch {}
+        try {
+            sock?.destroy();
+        } catch {
+        }
         streams.delete(streamId);
         return;
     }
@@ -93,7 +166,12 @@ ws.on('message', (data) => {
 
 ws.on('close', () => {
     console.log('[tunnex] WS closed');
-    for (const [, s] of streams) { try { s.destroy(); } catch {} }
+    for (const [, s] of streams) {
+        try {
+            s.destroy();
+        } catch {
+        }
+    }
     streams.clear();
 });
 
@@ -101,8 +179,16 @@ ws.on('error', (e) => console.error('[tunnex] WS error:', e.message));
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => {
-        try { ws.close(); } catch {}
-        for (const [, s] of streams) { try { s.destroy(); } catch {} }
+        try {
+            ws.close();
+        } catch {
+        }
+        for (const [, s] of streams) {
+            try {
+                s.destroy();
+            } catch {
+            }
+        }
         process.exit(0);
     });
 }
