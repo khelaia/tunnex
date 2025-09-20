@@ -94,7 +94,7 @@ if (!token) {
 
 const baseHost = `${host}-${argv.sub}.${argv.domain}`;
 const publicUrl = `https://${baseHost}`;
-const wsURL = `${argv.proto}://127.0.0.1:8888/register?host=${encodeURIComponent(host)}`;
+const wsURL = `${argv.proto}://${argv.domain}/register?host=${encodeURIComponent(host)}`;
 
 console.log(`[tunnex] local: ${argv.localHost}:${localPort}`);
 console.log(`[tunnex] remote: ${publicUrl}`);
