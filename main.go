@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,12 +13,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"tunnex/utils"
 
 	"github.com/gorilla/websocket"
 )
 
 type Client struct {
-	token        string
+	host         string
 	ws           *websocket.Conn
 	wsMux        sync.Mutex
 	lastStreamId uint64
@@ -68,16 +70,38 @@ var (
 	reg = NewRegistry()
 )
 
+func checkTokenValid(token string) (bool, error) {
+	tokens, err := utils.LoadTokens()
+	if err != nil {
+		return false, err
+	}
+
+	for _, t := range tokens {
+		if len(t) == len(token) &&
+			subtle.ConstantTimeCompare([]byte(t), []byte(token)) == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func main() {
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 
-		token := r.URL.Query().Get("token")
+		host := r.URL.Query().Get("host")
+		token := r.Header.Get("X-Tunnex-Token")
+
 		if token == "" {
-			http.Error(w, "token required", 400)
+			http.Error(w, "token required", 401)
 			return
 		}
 
-		fmt.Println("token:", token)
+		if isValid, _ := checkTokenValid(token); isValid == false {
+			http.Error(w, "invalid token provided", 401)
+			return
+		}
+
+		fmt.Println("host:", host)
 
 		ws, err := upgrader.Upgrade(w, r, nil)
 
@@ -86,8 +110,8 @@ func main() {
 			return
 		}
 
-		c := &Client{token: token, ws: ws, streams: make(map[uint64]net.Conn), lastStreamId: 1}
-		reg.Set(token, c)
+		c := &Client{host: host, ws: ws, streams: make(map[uint64]net.Conn), lastStreamId: 1}
+		reg.Set(host, c)
 
 		go clientListener(c)
 
@@ -116,7 +140,7 @@ func clientListener(c *Client) {
 		c.mu.Unlock()
 
 		_ = c.ws.Close()
-		reg.Del(c.token)
+		reg.Del(c.host)
 		fmt.Println("Client disconnected")
 	}()
 	for {
@@ -183,7 +207,7 @@ func clientListener(c *Client) {
 	}
 }
 
-func tokenFromHost(host string) string {
+func prefixFromHost(host string) string {
 	if i := strings.IndexByte(host, ':'); i >= 0 {
 		host = host[:i]
 	}
@@ -201,18 +225,18 @@ func tokenFromHost(host string) string {
 }
 
 func publicListener(w http.ResponseWriter, r *http.Request) {
-	host := r.Header.Get("X-Tunnel-Host")
+	host := r.Header.Get("X-Tunnex-Host")
 	if host == "" {
 		host = r.Host
 	}
 
-	token := tokenFromHost(host)
-	if token == "" {
+	prefix := prefixFromHost(host)
+	if prefix == "" {
 		http.Error(w, "no token host", 404)
 		return
 	}
 
-	client, ok := reg.Get(token)
+	client, ok := reg.Get(prefix)
 	if !ok {
 		http.Error(w, "client not found for host", 404)
 		return
