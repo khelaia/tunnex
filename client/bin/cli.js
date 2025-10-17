@@ -5,19 +5,22 @@ import WebSocket from 'ws';
 import net from 'net';
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHttpInspector } from '../inspect/http-inspector.js';
 
 
 const argv = minimist(process.argv.slice(2), {
     string: ['host', 'domain', 'sub', 'localHost', 'proto', 'add-token', 'token', 'token-file',],
-    number: ['port'],
-    boolean: ['insecure', 'help', 'h'],
+    number: ['port','inspect-port'],
+    boolean: ['insecure', 'help', 'h','inspect-http'],
     alias: {h: 'host', p: 'port'},
     default: {
-        domain: '127.0.0.1:8888',
+        domain: 'khelaia.com',
         sub: 'tunnex',
         localHost: '127.0.0.1',
         proto: 'wss',
-        insecure: false
+        insecure: false,
+        'inspect-http': false,
+        'inspect-port': 4444,
     }
 });
 
@@ -45,7 +48,7 @@ Token order: --token > --token-file > env TUNNEX_TOKEN > ./token.txt
 
 Examples:
   tunnex --add-token abc123
-  tunnex --host app --port 3000 --domain tunnex.example.com --proto wss
+  tunnex --host app --port 3000 --domain example.com --sub tunnex --proto wss
   tunnex --host app --port 3000 --domain 127.0.0.1:8888 --proto ws
 `);
 }
@@ -94,10 +97,15 @@ if (!token) {
 
 const baseHost = `${host}-${argv.sub}.${argv.domain}`;
 const publicUrl = `https://${baseHost}`;
-const wsURL = `${argv.proto}://${argv.domain}/register?host=${encodeURIComponent(host)}`;
+const wsURL = `${argv.proto}://${baseHost}/register?host=${encodeURIComponent(host)}`;
 
 console.log(`[tunnex] local: ${argv.localHost}:${localPort}`);
 console.log(`[tunnex] remote: ${publicUrl}`);
+
+
+const enableInspect = argv['inspect-http'] !== false;
+const insp = enableInspect ? createHttpInspector({ port: argv['inspect-port'] || 4040 }) : null;
+
 
 const ws = new WebSocket(wsURL, {
     perMessageDeflate: false,
@@ -130,20 +138,36 @@ ws.on('message', (data) => {
 
     if (type === 'registered') {
         const sock = net.createConnection({host: argv.localHost, port: localPort}, () => {
-            sock.on('data', (chunk) => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(`msg:${streamId}:${chunk.toString('hex')}`);
-                }
-            });
-            sock.on('close', () => ws.readyState === WebSocket.OPEN && ws.send(`close:${streamId}`));
-            sock.on('error', () => ws.readyState === WebSocket.OPEN && ws.send(`close:${streamId}`));
         });
-        streams.set(streamId, sock);
+        sock.on('data', (chunk) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(`msg:${streamId}:${chunk.toString('hex')}`);
+            }
+        });
+        sock.on('close', () => ws.readyState === WebSocket.OPEN && ws.send(`close:${streamId}`));
+        sock.on('error', () => {
+            const http404 =
+                "HTTP/1.1 404 Not Found\r\n" +
+                "Content-Type: text/plain\r\n" +
+                "Content-Length: 25\r\n" +
+                "\r\n" +
+                "client not found for host";
+            const hex404 = Buffer.from(http404, "utf8").toString("hex");
+            ws.send(`msg:${streamId}:${hex404}`);
+            ws.readyState === WebSocket.OPEN && ws.send(`close:${streamId}`)
+        });
+
+        streams.set(streamId, {sock, reqBuffers:[]});
         return;
     }
 
     if (type === 'msg') {
-        const sock = streams.get(streamId);
+        const stream = streams.get(streamId);
+        if (!stream)return;
+        const buf = Buffer.from(payloadHex, 'hex');
+        stream.reqBuffers.push(buf);
+
+        const sock = stream.sock
         if (sock && sock.writable) {
             try {
                 sock.write(Buffer.from(payloadHex, 'hex'));
@@ -154,15 +178,11 @@ ws.on('message', (data) => {
     }
 
     if (type === 'close') {
-        const sock = streams.get(streamId);
-        try {
-            sock?.destroy();
-        } catch {
-        }
-        streams.delete(streamId);
-        return;
+        finalizeRequest(streamId);
     }
 });
+
+
 
 ws.on('close', () => {
     console.log('[tunnex] WS closed');
@@ -191,4 +211,16 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
         }
         process.exit(0);
     });
+}
+
+function finalizeRequest(streamId) {
+    const s = streams.get(streamId);
+    if (!s) return;
+    try { s.sock?.destroy(); } catch {}
+    streams.delete(streamId);
+
+    if (insp) {
+        const raw = Buffer.concat(s.reqBuffers);
+        insp.pushRaw(streamId, raw);
+    }
 }

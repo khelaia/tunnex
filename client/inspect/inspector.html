@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Tunnex Inspect (HTTP)</title>
+    <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:0;background:#f7f7f8}
+        .bar{background:#111;color:#fff;padding:10px 16px;font-weight:600}
+        .wrap{max-width:1100px;margin:16px auto;padding:0 16px}
+        .card{background:#fff;border:1px solid #eee;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.03)}
+        table{width:100%;border-collapse:collapse}
+        th,td{padding:10px;border-bottom:1px solid #f0f0f0;font-size:14px;text-align:left}
+        tr:hover{background:#fafafa}
+        pre{background:#f6f8fa;border:1px solid #eee;border-radius:8px;padding:12px;overflow:auto}
+        .small{color:#666;font-size:12px}
+        .btn{padding:6px 10px;border:1px solid #ddd;border-radius:6px;background:#fafafa;cursor:pointer}
+    </style>
+</head>
+<body>
+<div class="bar">tunnex — HTTP Inspect</div>
+<div class="wrap">
+    <div class="card">
+        <table>
+            <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Content-Type</th><th>Body</th><th></th></tr></thead>
+            <tbody id="rows"></tbody>
+        </table>
+    </div>
+    <div style="height:12px"></div>
+    <div class="card" id="detail"><div style="padding:12px" class="small">Select a request</div></div>
+</div>
+
+<script>
+    const rows = document.getElementById('rows');
+    const detail = document.getElementById('detail');
+
+    function fmt(ts){ return new Date(ts).toLocaleTimeString(); }
+    function rowHTML(x){
+        return `<tr>
+    <td>${fmt(x.ts)}</td><td>${x.method}</td><td>${x.path}</td>
+    <td>${x.contentType||''}</td><td>${x.bodySize}</td>
+    <td><button class="btn" data-id="${x.id}">View</button></td>
+  </tr>`;
+    }
+    function load(){
+        fetch('/api/requests').then(r=>r.json()).then(list=>{
+            rows.innerHTML = list.map(rowHTML).join('');
+        });
+    }
+    rows.addEventListener('click', e=>{
+        const id = e.target?.dataset?.id; if(!id) return;
+        fetch('/api/requests/'+id).then(r=>r.json()).then(x=>{
+            detail.innerHTML = `<div style="padding:16px">
+      <div class="small">${new Date(x.ts).toLocaleString()}</div>
+      <pre>${x.method} ${x.path}</pre>
+      <h4>Headers</h4><pre>${JSON.stringify(x.headers||{},null,2)}</pre>
+      <h4>Body (64KB preview)</h4><pre>${x.bodyPreview||''}</pre>
+    </div>`;
+        });
+    });
+    load();
+    // live updates
+    const es = new EventSource('/events');
+    es.onmessage = () => load();
+</script>
+</body>
+</html>
